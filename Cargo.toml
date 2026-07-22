@@ -1,0 +1,49 @@
+[package]
+name = "rsnap"
+version = "0.1.0"
+edition = "2024"
+description = "A native Windows tray app for screenshotting, markup, and screen recording across multi-monitor, mixed-DPI desktops."
+authors = ["Adam Post"]
+license = "MIT"
+repository = "https://github.com/adamrpostjr/rsnap"
+readme = "README.md"
+keywords = ["screenshot", "screen-recording", "annotation", "windows", "tray"]
+categories = ["multimedia", "gui"]
+
+[dependencies]
+ab_glyph = "0.2.32"
+arboard = "3.6.1"
+crossbeam-channel = "0.5.16"
+dirs = "6.0.0"
+eframe = "0.35.0"
+egui = "0.35.0"
+egui-wgpu = "0.35.0"
+image = "0.25.10"
+imageproc = "0.27.0"
+raw-window-handle = "0.6.2"
+resvg = "0.47.0"
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+tiny-skia = "0.12.0"
+toml = "1.1.3"
+tray-icon = "0.24.1"
+usvg = "0.47.0"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Registry", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole"] }
+windows-capture = "2.0.0"
+wgpu = "29.0.4"
+
+[build-dependencies]
+winresource = "0.1.31"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+# Deliberately NOT `panic = "abort"`: this is a long-running background tray
+# utility with several worker threads (capture sessions, tray icon, native
+# dialogs). The default unwind-and-terminate-that-thread behavior means a
+# stray panic on one of those threads doesn't take the whole process (and the
+# tray icon with it) down — consistent with the capture-session hardening in
+# `capture::start_all`, which favors staying alive in a degraded state over a
+# hard abort.
