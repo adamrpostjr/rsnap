@@ -50,7 +50,7 @@ Section "rsnap" SecMain
     WriteUninstaller "$INSTDIR\Uninstall.exe"
 
     WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "rsnap"
-    WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "0.1.0"
+    WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "0.1.1"
     WriteRegStr HKCU "${UNINST_KEY}" "Publisher" "Adam Post"
     WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" "$INSTDIR\Uninstall.exe"
     WriteRegStr HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
