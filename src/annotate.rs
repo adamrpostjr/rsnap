@@ -366,16 +366,16 @@ pub fn bake_annotations(
                 width,
                 highlight,
             } => {
-                let (px, w) = if *highlight {
-                    (to_rgba(*color, 90), width * 4.0)
-                } else {
-                    (to_rgba(*color, 255), *width)
-                };
                 let drawn = if smooth { smooth_points(points) } else { points.clone() };
-                for pair in drawn.windows(2) {
-                    let a = pair[0] - origin;
-                    let b = pair[1] - origin;
-                    draw_thick_line(image, (a.x, a.y), (b.x, b.y), px, w);
+                if *highlight {
+                    draw_highlight_stroke(image, &drawn, origin, *color, width * 4.0);
+                } else {
+                    let px = to_rgba(*color, 255);
+                    for pair in drawn.windows(2) {
+                        let a = pair[0] - origin;
+                        let b = pair[1] - origin;
+                        draw_thick_line(image, (a.x, a.y), (b.x, b.y), px, *width);
+                    }
                 }
             }
             Annotation::Box { rect, color, width } => {
@@ -441,6 +441,90 @@ pub fn bake_annotations(
 
 fn to_rgba(color: egui::Color32, alpha: u8) -> image::Rgba<u8> {
     image::Rgba([color.r(), color.g(), color.b(), alpha])
+}
+
+/// Bakes a Highlight stroke as one flat translucent tint over whatever's
+/// underneath, rather than stamping overlapping filled circles directly onto
+/// `image` the way `draw_thick_line` does for opaque strokes.
+///
+/// `imageproc::drawing::draw_filled_circle_mut` draws onto a plain
+/// `image::RgbaImage` by overwriting pixels (`Canvas::draw_pixel` ==
+/// `put_pixel`, not alpha blending — blending needs the `imageproc::Blend`
+/// wrapper). For an opaque stroke that's fine, but a highlight's
+/// `to_rgba(color, 90)` pixel was being written raw: the real screenshot
+/// pixel underneath was destroyed rather than blended with, so the "see
+/// through" effect only ever existed in the alpha byte, not in the RGB —
+/// once that alpha channel is dropped or ignored (clipboard paste, JPEG
+/// export, most viewers), what's left is solid highlight color. Rendering
+/// the whole stroke as an opaque coverage mask first and compositing it onto
+/// the real image in a single blend pass (instead of blending per
+/// overlapping circle stamp, which would compound alpha well past 90/255
+/// wherever stamps overlap) fixes both problems at once.
+fn draw_highlight_stroke(
+    image: &mut image::RgbaImage,
+    points: &[egui::Pos2],
+    origin: egui::Vec2,
+    color: egui::Color32,
+    width: f32,
+) {
+    if points.len() < 2 {
+        return;
+    }
+    let half = (width / 2.0).max(0.5);
+    let radius = half.round().max(1.0) as i32;
+
+    let translated: Vec<(f32, f32)> = points.iter().map(|p| ((*p - origin).x, (*p - origin).y)).collect();
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for (x, y) in &translated {
+        min_x = min_x.min(x - radius as f32);
+        max_x = max_x.max(x + radius as f32);
+        min_y = min_y.min(y - radius as f32);
+        max_y = max_y.max(y + radius as f32);
+    }
+    let min_x = (min_x.floor().max(0.0) as i64).min(image.width() as i64);
+    let min_y = (min_y.floor().max(0.0) as i64).min(image.height() as i64);
+    let max_x = (max_x.ceil() as i64).clamp(0, image.width() as i64);
+    let max_y = (max_y.ceil() as i64).clamp(0, image.height() as i64);
+    if max_x <= min_x || max_y <= min_y {
+        return;
+    }
+    let w = (max_x - min_x) as u32;
+    let h = (max_y - min_y) as u32;
+
+    let mut mask = image::RgbaImage::new(w, h);
+    let opaque = image::Rgba([255, 255, 255, 255]);
+    for pair in translated.windows(2) {
+        let a = (pair[0].0 - min_x as f32, pair[0].1 - min_y as f32);
+        let b = (pair[1].0 - min_x as f32, pair[1].1 - min_y as f32);
+        draw_thick_line(&mut mask, a, b, opaque, width);
+    }
+
+    let tint = to_rgba(color, 90);
+    let alpha = tint.0[3] as f32 / 255.0;
+    for y in 0..h {
+        for x in 0..w {
+            if mask.get_pixel(x, y).0[3] == 0 {
+                continue;
+            }
+            let ix = min_x as u32 + x;
+            let iy = min_y as u32 + y;
+            let bg = *image.get_pixel(ix, iy);
+            let blend = |s: u8, d: u8| (s as f32 * alpha + d as f32 * (1.0 - alpha)).round() as u8;
+            image.put_pixel(
+                ix,
+                iy,
+                image::Rgba([
+                    blend(tint.0[0], bg.0[0]),
+                    blend(tint.0[1], bg.0[1]),
+                    blend(tint.0[2], bg.0[2]),
+                    bg.0[3],
+                ]),
+            );
+        }
+    }
 }
 
 /// Loaded from disk once (first call) and cached for the rest of the

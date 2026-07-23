@@ -1,9 +1,14 @@
 //! Monitor enumeration & DPI caching.
 //!
 //! Everything here lives in **physical pixels**, relative to the virtual-desktop
-//! origin (which can be negative). This is enumerated once at startup and cached;
-//! it is only ever refreshed in response to `WM_DISPLAYCHANGE`, never on the
-//! hotkey hot path.
+//! origin (which can be negative). This is enumerated once at startup and cached.
+//! There's no window anywhere in this process set up to receive
+//! `WM_DISPLAYCHANGE` (the overlay's own winit window doesn't hook it, and the
+//! tray thread's hotkey queue is a message-only queue, which never gets it
+//! either), so `overlay.rs`'s `maybe_refresh_display_layout` instead polls
+//! `DisplayLayout::enumerate` + `PartialEq` on a slow (~1s) cadence, well off
+//! the hotkey hot path, and swaps in a fresh layout/capture-session set the
+//! moment it observes a change.
 
 use windows::Win32::Foundation::{LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW};
@@ -60,7 +65,7 @@ impl PxRect {
 
 /// One physical monitor's geometry, DPI, and identity, as enumerated at
 /// startup (or on `WM_DISPLAYCHANGE`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MonitorInfo {
     /// Win32 device name, e.g. `\\.\DISPLAY1`.
     pub name: String,
@@ -85,7 +90,7 @@ impl MonitorInfo {
 
 /// The full enumerated desktop: every real monitor plus the virtual-desktop
 /// bounding box that contains them all.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DisplayLayout {
     pub monitors: Vec<MonitorInfo>,
     /// Bounding box of the full virtual desktop (may include dead zones not
@@ -94,8 +99,8 @@ pub struct DisplayLayout {
 }
 
 impl DisplayLayout {
-    /// Enumerate all monitors and cache their physical rects + DPI. Call once at
-    /// startup, and again only on `WM_DISPLAYCHANGE`.
+    /// Enumerate all monitors and cache their physical rects + DPI. Called once
+    /// at startup, and again by `overlay.rs`'s periodic layout-change poll.
     pub fn enumerate() -> Self {
         let monitors = enumerate_monitors();
         let virtual_desktop = virtual_desktop_rect();

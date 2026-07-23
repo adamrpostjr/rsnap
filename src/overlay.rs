@@ -198,6 +198,12 @@ struct PinnedWindow {
 pub struct OverlayApp {
     layout: DisplayLayout,
     captures: Vec<MonitorCapture>,
+    /// Earliest time `maybe_refresh_display_layout` should next actually
+    /// re-enumerate monitors — throttles a cheap-but-not-free Win32 poll
+    /// (`EnumDisplayMonitors` + `GetSystemMetrics`) run every `logic()` tick
+    /// rather than reacting to a `WM_DISPLAYCHANGE` message, since nothing in
+    /// this process has a window set up to receive one. See `monitors.rs`.
+    next_layout_check: std::time::Instant,
     /// Snapshot of each monitor's latest frame, taken at the moment the
     /// overlay was last shown. Indexed the same as `layout.monitors`.
     frozen: Vec<Option<SharedFrame>>,
@@ -332,6 +338,7 @@ impl OverlayApp {
         Self {
             layout,
             captures,
+            next_layout_check: std::time::Instant::now() + std::time::Duration::from_secs(1),
             frozen: vec![None; monitor_count],
             textures: (0..monitor_count).map(|_| None).collect(),
             placed_since_shown: false,
@@ -369,6 +376,73 @@ impl OverlayApp {
             settings_capturing: None,
             config,
         }
+    }
+
+    /// Polls (on a throttled ~1s cadence, from `logic()` so it runs whether or
+    /// not the overlay is visible) for a monitor layout change — a monitor
+    /// added/removed/moved/resized, or a DPI change — and swaps in a fresh
+    /// `DisplayLayout` plus a fresh set of per-monitor capture sessions if one
+    /// is found. Without this, `self.layout`/`self.captures` stay permanently
+    /// pinned to whatever was true at process start (there's no
+    /// `WM_DISPLAYCHANGE` hook anywhere in this process — see `monitors.rs`),
+    /// so a real layout change previously left the overlay silently placing,
+    /// clamping, and compositing against stale monitor geometry forever,
+    /// appearing to "freeze" on the old layout until the app was restarted.
+    ///
+    /// Skipped entirely while a recording is active: `Recorder` and the
+    /// capture sessions it's sampling from (see `logic()`'s "Recording frame
+    /// sampling" block) are tied to the current `self.layout`/`self.captures`
+    /// for the recording's whole lifetime, and swapping those out from under
+    /// an in-progress recording is out of scope here — the recording simply
+    /// keeps going against the old layout until it's stopped, at which point
+    /// the next poll picks up the change normally.
+    ///
+    /// If the overlay is mid-capture (visible) when a change is found, that
+    /// capture is cancelled outright (as if the user hit Escape) rather than
+    /// trying to remap an in-progress selection/annotations onto a
+    /// potentially different coordinate space.
+    fn maybe_refresh_display_layout(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let now = std::time::Instant::now();
+        if now < self.next_layout_check {
+            return;
+        }
+        self.next_layout_check = now + std::time::Duration::from_secs(1);
+
+        if self.recording.is_some() {
+            return;
+        }
+
+        let new_layout = DisplayLayout::enumerate();
+        if new_layout == self.layout {
+            return;
+        }
+        crate::logging::log_error(format!(
+            "monitor layout changed ({} monitor(s) now) — re-enumerating and restarting capture sessions",
+            new_layout.monitors.len()
+        ));
+
+        if self.visible {
+            if let Some(hwnd) = self.hwnd(frame) {
+                win32::move_offscreen(hwnd);
+            }
+            self.visible = false;
+            self.closing_frames_remaining = 0;
+            self.drag_start = None;
+            self.drag_current = None;
+            self.gesture = Gesture::None;
+            self.tool = None;
+            self.text_edit = None;
+            self.clear_annotations();
+        }
+
+        // Dropping the old `Vec<MonitorCapture>` here stops each old
+        // session's background capture thread before the new ones start.
+        self.captures = capture::start_all(&new_layout.monitors);
+        self.frozen = vec![None; new_layout.monitors.len()];
+        self.textures = (0..new_layout.monitors.len()).map(|_| None).collect();
+        self.placed_since_shown = false;
+        self.layout = new_layout;
+        ctx.request_repaint();
     }
 
     /// Snapshot each monitor's current warm capture into `frozen`, and push it
@@ -577,9 +651,23 @@ impl OverlayApp {
     /// Flips the overlay to visible with a clean slate — shared by the tray
     /// menu's "Show Overlay" item and the global Ctrl+Shift+S hotkey.
     fn show_overlay(&mut self, ctx: &egui::Context) {
+        if self.closing_frames_remaining > 0 {
+            // A show request landed while the last capture's blank-frame
+            // countdown (see `closing_frames_remaining`'s doc comment) is
+            // still running. Resetting it to 0 here used to force an
+            // immediate re-placement + GPU texture re-upload on the very
+            // next frame, collapsing the blank-frame buffer that exists
+            // specifically to avoid presenting stale swapchain content
+            // during the hide transition — visible as a flash, and a
+            // plausible trigger for the occasional hotkey-press crash (a
+            // second `assert_placement`/`freeze_and_upload` landing back to
+            // back with the first, mid-DWM-transition). Dropping this
+            // request is safe: the countdown finishes in at most 2 frames,
+            // and a still-held/re-pressed hotkey will just show it then.
+            return;
+        }
         self.visible = true;
         self.placed_since_shown = false;
-        self.closing_frames_remaining = 0;
         self.drag_start = None;
         self.drag_current = None;
         self.tool = None;
@@ -637,6 +725,8 @@ impl eframe::App for OverlayApp {
         // Belt-and-suspenders: never let egui/winit auto-detect scaling rescale
         // our physical-pixel coordinate space.
         ctx.set_pixels_per_point(1.0);
+
+        self.maybe_refresh_display_layout(ctx, frame);
 
         // --- Tray/hotkey event draining ---
 

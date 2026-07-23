@@ -150,7 +150,23 @@ fn init_dpi_awareness() {
     }
 }
 
+/// Installs a panic hook that logs the panic message/location via
+/// `logging::log_error` before the default hook runs. With
+/// `#![windows_subsystem = "windows"]` there's no console for a panic's
+/// default stderr output to ever reach, so without this a panic is simply a
+/// silent crash — indistinguishable from a driver-level fault, and exactly
+/// why an intermittent "hotkey press occasionally crashes" report had no
+/// trace to go on.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        logging::log_error(format!("panic: {info}"));
+        default_hook(info);
+    }));
+}
+
 fn main() -> eframe::Result {
+    install_panic_hook();
     init_dpi_awareness();
 
     let config = config::load();
